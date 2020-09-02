@@ -1,0 +1,9 @@
+/books/
+/links
+/model/save/
+/data/challenge2018
+/venv
+
+*.pdf
+*.log
+*.aux
