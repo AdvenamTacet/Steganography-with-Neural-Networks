@@ -3,6 +3,7 @@
 /model/save/
 /data/challenge2018
 /venv
+/data
 
 *.pdf
 *.log
