@@ -114,6 +114,7 @@ class e2eCNN(template.EncoderDecoder):
         layer_5 = layers.Conv2D(filters=3, kernel_size=bks, dilation_rate=dr, activation='relu',
                                 padding='same', name='decoder_l_5')(layer_4)
 
-        out = layers.Conv2D(filters=1, kernel_size=1, padding='same', name='recovered_image')(layer_5)
+        out = layers.Conv2D(filters=1, kernel_size=1, padding='same',
+                            name='recovered_image')(layer_5)
 
         return tf.keras.Model([covered_image], [out], name="decoder_model")

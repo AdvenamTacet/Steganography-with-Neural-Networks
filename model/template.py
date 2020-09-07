@@ -348,7 +348,7 @@ class GAN(EncoderDecoder):
         return tf.keras.layers.Lambda(
             lambda x:
                 encoder_loss(x['color'], x['encoder_output']) +
-                2 * decoder_loss(x['gray'], x['decoder_output']) +
+                decoder_loss(x['gray'], x['decoder_output']) +
                 tf.expand_dims(x['discriminator_output'], axis=1),
             trainable=False,
             name='generator_loss'
