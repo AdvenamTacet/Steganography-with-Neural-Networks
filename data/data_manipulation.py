@@ -4,10 +4,12 @@ import math
 
 class ShuffleSequence(tf.keras.utils.Sequence):
 
-    def __init__(self, data, batch_size):
+    def __init__(self, data, batch_size, gen_keys: bool = False, dropout_rate: float = 0.7):
         self.color, self.gray = data[0].copy(), data[1].copy()
 
         self.batch_size = batch_size
+        self.gen_keys = gen_keys
+        self.dropout_rate = dropout_rate
 
     def __len__(self):
         return math.ceil(len(self.color) / self.batch_size)
@@ -29,7 +31,13 @@ class ShuffleSequence(tf.keras.utils.Sequence):
 
         batch_color = list(map(path_to_tensor, batch_color))
         batch_gray  = list(map(path_to_tensor, batch_gray))
-        return {'color': tf.stack(batch_color) / 255., 'gray': tf.image.rgb_to_grayscale(tf.stack(batch_gray)) / 255.}
+        ret = {'color': tf.stack(batch_color) / 255., 'gray': tf.image.rgb_to_grayscale(tf.stack(batch_gray)) / 255.}
+
+        if self.gen_keys:
+            ret.update({'key': tf.random.normal(ret['gray'].shape)})
+            ret.update({'partial_key': tf.nn.dropout(ret['key'], self.dropout_rate)})
+
+        return ret
 
     def on_epoch_end(self):
         self.gray = self.gray[-1:] + self.gray[:-1]
@@ -43,7 +51,8 @@ class ShuffleSequence(tf.keras.utils.Sequence):
         if n is None:
             return ret
 
-        return {'color' : ret['color'][:n], 'gray' : ret['gray'][:n]}
+        return {key: ret[key][:n] for key in ret}
+        # return {'color' : ret['color'][:n], 'gray' : ret['gray'][:n]}
 
 
 def parse_dataset(dataset_name='challenge2018'):

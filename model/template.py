@@ -1,9 +1,6 @@
 import tensorflow as tf
 import datetime
 
-# from progress.bar import Bar
-# from IPython import display
-
 
 class EncoderDecoder:
     """ A template to (Neural Network) steganography learning framework.
@@ -17,11 +14,25 @@ class EncoderDecoder:
     encoder: tf.keras.Model
     decoder: tf.keras.Model
     name: str
+    _creation_time: str
     _generator_optimizer: tf.keras.optimizers.Optimizer
     _covered_image_loss: tf.function
     _decoder_loss: tf.function
 
     def __init__(self):
+        """
+        Initialize encryptor and decryptor model.
+        Should be called when
+        - gen_encoder_model
+        - gen_decoder_model
+        - get_name
+        may be called without an error.
+
+        Function will try to call load, yet if an error occurs, will be printed and ignored.
+        """
+        self.name = self.get_name()
+        self._epoch_counter = 0
+
         self.encoder = self.gen_encoder_model()
         self.decoder = self.gen_decoder_model()
 
@@ -29,9 +40,40 @@ class EncoderDecoder:
         self._covered_image_loss = None
         self._decoder_loss = None
 
-        self.name = None
+        self._train_file_writer = tf.summary.create_file_writer('logs/{}/train'.format(self.name))
+        self._test_file_writer = tf.summary.create_file_writer('logs/{}/test'.format(self.name))
+
+        try:
+            self.load(self.name)
+        except Exception as e:
+            print(e)
+
+    def gen_graphs(self):
+        """
+        Creates graphs for TesnorBoard, you may need to recreate model after that.
+        :param self:
+        :return:
+        """
+        encoder_file_writer = tf.summary.create_file_writer('logs/{}/graphs/encoder'.format(self.name))
+        with encoder_file_writer.as_default():
+            encoder_graph = tf.Graph()
+            with encoder_graph.as_default():
+                self.gen_encoder_model()
+            tf.summary.graph(encoder_graph)
+
+        decoder_file_writer = tf.summary.create_file_writer(
+            'logs/{}/graphs/decoder'.format(self.name))
+        with decoder_file_writer.as_default():
+            decoder_graph = tf.Graph()
+            with decoder_graph.as_default():
+                self.gen_decoder_model()
+            tf.summary.graph(decoder_graph)
+
+        encoder_file_writer.flush()
+        decoder_file_writer.flush()
 
     @staticmethod
+    @tf.function
     def encoder_input_prepare(arguments: dict):
         """
         Returns input to the self.encoder.
@@ -43,6 +85,7 @@ class EncoderDecoder:
         return [arguments['color'], arguments['gray']]
 
     @staticmethod
+    @tf.function
     def decoder_input_prepare(arguments: dict):
         """
         Returns input to the self.decoder.
@@ -52,6 +95,16 @@ class EncoderDecoder:
         :return: tf.Tensor with encoder output
         """
         return arguments['encoder_output']
+
+    def get_name(self):
+        """
+        Function returning model name.
+        Should be defined in inheriting class.
+
+        :return: str
+        """
+
+        raise Exception("Method get_name not implemented!")
 
     def gen_encoder_model(self):
         """
@@ -112,7 +165,11 @@ class EncoderDecoder:
         decoder_loss = self.get_decoder_loss()
 
         return tf.keras.layers.Lambda(
-            lambda x: encoder_loss(x['color'], x['encoder_output']) + decoder_loss(x['gray'], x['decoder_output']),
+            lambda x: (
+                encoder_loss(x['color'], x['encoder_output']),
+                decoder_loss(x['gray'], x['decoder_output']),
+                1.25 * encoder_loss(x['color'], x['encoder_output']) + decoder_loss(x['gray'], x['decoder_output'])
+            ),
             trainable=False,
             name='generator_loss'
         )
@@ -127,18 +184,27 @@ class EncoderDecoder:
         :return: tf.keras.optimizers.Adam
         """
         if self._generator_optimizer is None:
+            learning_rate = lambda: 3.25 * (0.001 if self._epoch_counter < 25 else
+                                           (0.0001 if self._epoch_counter < 50 else
+                                            (0.00007 if self._epoch_counter < 125 else 3e-5))
+            )
+
             self._generator_optimizer = tf.keras.optimizers.Adam(
-                learning_rate=0.001, beta_1=0.9, beta_2=0.999, epsilon=1e-07, amsgrad=False, name='generator_optimizer'
+                learning_rate=learning_rate, beta_1=0.9, beta_2=0.999, epsilon=1e-07,
+                amsgrad=False, name='generator_optimizer'
             )
 
         return self._generator_optimizer
 
-    def score(self, dataset: tf.keras.utils.Sequence):
+    def score(self, dataset: tf.keras.utils.Sequence, verbose: bool = False):
         """
         Calculates model score over dataset.
         Encoder score and decoder score are calculated separately.
 
+
         :param dataset: iterable with batches.
+        :param verbose: if value will be printed
+        :param skip_prob: chance to skip a batch
         :return:
         """
         encoder_score = 0.
@@ -160,7 +226,11 @@ class EncoderDecoder:
             encoder_score += tf.math.reduce_mean(covered_loss(color, encoder_output)).numpy()
             decoder_score += tf.math.reduce_mean(decoder_loss(gray, decoder_output)).numpy()
 
-        print("Score: covered_image {}, recovered_image {}".format(encoder_score/len(dataset), decoder_score/len(dataset)))
+        if verbose:
+            print("Score: covered_image {}, recovered_image {}".format(encoder_score/len(dataset),
+                                                                       decoder_score/len(dataset)))
+
+        return encoder_score/len(dataset), decoder_score/len(dataset)
 
     def gen_train_step(self):
         """
@@ -183,17 +253,19 @@ class EncoderDecoder:
                 decoder_output = self.decoder(self.decoder_input_prepare(arguments), training=True)
                 arguments.update({'decoder_output': decoder_output})
 
-                loss_value = loss(arguments)
+                encoder_loss, decoder_loss, generator_loss = loss(arguments)
 
             trainable = self.encoder.trainable_variables + self.decoder.trainable_variables
-            gradients = tape.gradient(loss_value, trainable)
+            gradients = tape.gradient(generator_loss, trainable)
 
             optimizer.apply_gradients(zip(gradients, trainable))
 
+            return tf.reduce_mean(encoder_loss), tf.reduce_mean(decoder_loss), tf.reduce_mean(generator_loss), None
+
         return train_step
 
-    def train(self, dataset: tf.keras.utils.Sequence, epochs : int, fast: bool = True,
-              train_step: tf.function = None, autosave: bool = None):
+    def train(self, dataset: tf.keras.utils.Sequence, epochs : int, visual_batch: dict = None, fast: bool = True,
+              train_step: tf.function = None, autosave: bool = None, verify_dataset: tf.keras.utils.Sequence = None):
         """
         Function responsible for Model training. May work with different types of models.
         Should not be overwritten.
@@ -201,28 +273,92 @@ class EncoderDecoder:
 
         :param dataset: iterable with batches
         :param epochs: number of epochs
+        :param visual_batch: batch used for visualisation purposes
         :param fast: if False, after every epoch, score will be calculated
         :param train_step: TensorFlow function responsible for training step, if none, self.gen_train_step will be used
         :param autosave: defines if model should be saved after every learning step
+        :param verify_dataset: to calculate loss after every epoch
         :return:
         """
+        def visualise(visual_batch, file_writer, save_inputs):
+            with file_writer.as_default():
+                _sample_batch = visual_batch.copy()
+
+                if save_inputs:
+                    tf.summary.image("Color images", _sample_batch['color'], step=self._epoch_counter)
+                    tf.summary.image("Gray images", _sample_batch['gray'], step=self._epoch_counter)
+
+                _sample_batch.update({'encoder_output': self.encoder(
+                    self.encoder_input_prepare(_sample_batch), training=False)})
+                tf.summary.image("Connected images", _sample_batch['encoder_output'], step=self._epoch_counter)
+
+                tf.summary.image("Connected diffs", tf.math.sigmoid(_sample_batch['encoder_output'] -
+                                                                    _sample_batch['color']), step=self._epoch_counter)
+
+                _sample_batch.update({'decoder_output': self.decoder(
+                    self.decoder_input_prepare(_sample_batch), training=False)})
+                tf.summary.image("Restored images", _sample_batch['decoder_output'], step=self._epoch_counter)
+
+                tf.summary.image("Restored diffs", tf.math.sigmoid(_sample_batch['decoder_output'] -
+                                                                   _sample_batch['gray']), step=self._epoch_counter)
+
+        if self.name is None:
+            raise Exception("Model name is unknown in function train.")
 
         if autosave is None:
-            autosave = epochs > 10
+            autosave = epochs > 2
 
         if train_step is None:
             train_step = self.gen_train_step()
 
         for epoch_id in range(epochs):
             start_time = datetime.datetime.now()
+            loss_values = {'encoder': [], 'decoder': [], 'generator': []}
             for i, batch in enumerate(dataset):
                 print("Epoch {}/{}, batch {}/{}".format(epoch_id+1, epochs, i+1, len(dataset)))
-                train_step(batch)
+                print("Real: {}".format(1 + self._epoch_counter))
+
+                encoder_loss, decoder_loss, generator_loss, discriminator_score = train_step(batch)
+                step_losses = {'encoder': encoder_loss, 'decoder': decoder_loss, 'generator': generator_loss}
+                if discriminator_score is not None:
+                    discriminator_loss_value, discriminator_output, discriminator_real_output = discriminator_score
+                    step_losses.update({'discriminator': discriminator_loss_value, 'discriminator_output': discriminator_output,
+                                        'discriminator_real': discriminator_real_output}
+                    )
+                    if 'discriminator' not in loss_values:
+                        loss_values.update({'discriminator': [], 'discriminator_output': [], 'discriminator_real': []})
+
+                for key in step_losses:
+                    if step_losses[key] is not None:
+                        loss_values[key].append(step_losses[key])
+
+            with self._train_file_writer.as_default():
+                for key in loss_values:
+                    if len(loss_values[key]) > 0:
+                        value_name = (key + ' loss' if '_' not in key else key)
+                        tf.summary.scalar(value_name, tf.reduce_mean(tf.stack(loss_values[key])), step=self._epoch_counter)
+
+            if visual_batch is not None:
+                if 'train' in visual_batch:
+                    visualise(visual_batch['train'], self._train_file_writer, epoch_id == 0)
+                if 'test' in visual_batch:
+                    visualise(visual_batch['test'], self._test_file_writer, epoch_id == 0)
+
             dataset.on_epoch_end()
 
             print("Time:", (datetime.datetime.now() - start_time).seconds)
-            if not fast:
-                self.score(dataset)
+
+            if verify_dataset is not None:
+                verify_start_time = datetime.datetime.now()
+                encoder_score, decoder_score = self.score(verify_dataset)
+
+                with self._test_file_writer.as_default():
+                    tf.summary.scalar('encoder loss', encoder_score, step=self._epoch_counter)
+                    tf.summary.scalar('decoder loss', decoder_score, step=self._epoch_counter)
+
+                print("Additional time:", (datetime.datetime.now() - verify_start_time).seconds)
+
+            self._epoch_counter += 1
 
             if autosave:
                 self.save()
@@ -247,7 +383,10 @@ class EncoderDecoder:
         self.encoder.save_weights('save/{}/encoder'.format(name), overwrite=True)
         self.decoder.save_weights('save/{}/decoder'.format(name), overwrite=True)
 
-    def load(self, name=None):
+        with open('logs/{}/counter.data'.format(name), 'w') as f:
+            f.write(str(self._epoch_counter))
+
+    def load(self, name=None, only_generator: bool = True):
         """
         Function loading encoder, decoder from files created by save member function.
 
@@ -255,6 +394,7 @@ class EncoderDecoder:
         If both are None, exception will bre raised.
 
         :param name: name of the Autoencoder model, optional.
+        :param only_generator: ignored
         :return:
         """
         if name is None and self.name is None:
@@ -265,6 +405,9 @@ class EncoderDecoder:
 
         self.encoder.load_weights('save/{}/encoder'.format(name))
         self.decoder.load_weights('save/{}/decoder'.format(name))
+
+        with open('logs/{}/counter.data'.format(name), 'r') as f:
+            self._epoch_counter = int(f.read())
 
     def summary(self):
         """
@@ -291,14 +434,38 @@ class GAN(EncoderDecoder):
     _discriminator_value_loss: tf.function
 
     def __init__(self):
-        super().__init__()
+        """
+        Starts with creating discriminator model.
+        Should be called when 'gen_discriminator_model' won't rise an error.
+        At the end, calls EncoderDecoder initializer.
 
+        Function will try to call load, yet if an error occurs, will be printed and ignored.
+        """
         self._discriminator_optimizer = None
         self._discriminator_value_loss = None
 
         self.discriminator = self.gen_discriminator_model()
+        super().__init__()
+
+    def gen_graphs(self):
+        """
+        Creates graphs for TesnorBoard, you may need to recreate model after that.
+        :param self:
+        :return:
+        """
+        super().gen_graphs()
+
+        discriminator_file_writer = tf.summary.create_file_writer('logs/{}/graphs/discriminator'.format(self.name))
+        with discriminator_file_writer.as_default():
+            discriminator_graph = tf.Graph()
+            with discriminator_graph.as_default():
+                self.gen_discriminator_model()
+            tf.summary.graph(discriminator_graph)
+
+        discriminator_file_writer.flush()
 
     @staticmethod
+    @tf.function
     def discriminator_input_prepare(arguments: dict):
         """
         Returns input to the self.decoder.
@@ -321,9 +488,7 @@ class GAN(EncoderDecoder):
         """
         salted = arguments.copy()
 
-        salted['encoder_output'] = tf.keras.layers.GaussianNoise(1 / 255., trainable=False)(salted['color'])
-        salted['color'] = tf.keras.layers.GaussianNoise(1 / 255., trainable=False)(salted['color'])
-        # salted['encoder_output'] = salted['color']
+        salted['encoder_output'] = tf.keras.layers.GaussianNoise(0.5 / 255., trainable=False)(salted['color'])
 
         return self.discriminator_input_prepare(salted)
 
@@ -346,15 +511,18 @@ class GAN(EncoderDecoder):
         decoder_loss = self.get_decoder_loss()
 
         return tf.keras.layers.Lambda(
-            lambda x:
+            lambda x:(
+                encoder_loss(x['color'], x['encoder_output']),
+                decoder_loss(x['gray'], x['decoder_output']),
                 encoder_loss(x['color'], x['encoder_output']) +
-                decoder_loss(x['gray'], x['decoder_output']) +
-                tf.expand_dims(x['discriminator_output'], axis=1),
+                1.25*decoder_loss(x['gray'], x['decoder_output']) +
+                3 * tf.expand_dims(x['discriminator_output'], axis=1)/1000.
+            ),
             trainable=False,
             name='generator_loss'
         )
 
-    def get_discriminator_value_loss(self):
+    def get_discriminator_loss_for_a_set(self):
         """
         Returns self._discriminator_value_loss.
         To change a loss function of the discriminator, change that variable.
@@ -380,7 +548,7 @@ class GAN(EncoderDecoder):
 
         :return: tf.keras.layers.Lambda calculating discriminator loss value.
         """
-        loss = self.get_discriminator_value_loss()
+        loss = self.get_discriminator_loss_for_a_set()
 
         return tf.keras.layers.Lambda(
             lambda x:
@@ -400,8 +568,13 @@ class GAN(EncoderDecoder):
         :return: tf.keras.optimizers.Adam
         """
         if self._discriminator_optimizer is None:
+            learning_rate = lambda: 28.5 * (0.001 if self._epoch_counter < 25 else
+                                            (0.0001 if self._epoch_counter < 50 else
+                                             (0.00007 if self._epoch_counter < 125 else 4e-5))
+            )
+
             self._discriminator_optimizer = tf.keras.optimizers.Adam(
-                learning_rate=0.0001, beta_1=0.9, beta_2=0.999, epsilon=1e-07,
+                learning_rate=learning_rate, beta_1=0.9, beta_2=0.999, epsilon=1e-07,
                 amsgrad=True, name='discriminator_optimizer'
             )
 
@@ -485,9 +658,8 @@ class GAN(EncoderDecoder):
                                                                training=True)
                 arguments.update({'discriminator_real_output': discriminator_real_output})
 
-                generator_loss_value = generator_loss(arguments)
+                encoder_loss, decoder_loss, generator_loss_value = generator_loss(arguments)
                 discriminator_loss_value = discriminator_loss(arguments)
-
             generator_trainable = self.encoder.trainable_variables + self.decoder.trainable_variables
             discriminator_trainable = self.discriminator.trainable_variables
 
@@ -496,6 +668,14 @@ class GAN(EncoderDecoder):
 
             generator_optimizer.apply_gradients(zip(generator_gradients, generator_trainable))
             discriminator_optimizer.apply_gradients(zip(discriminator_gradients, discriminator_trainable))
+
+            return (
+                tf.reduce_mean(encoder_loss),
+                tf.reduce_mean(decoder_loss),
+                tf.reduce_mean(generator_loss_value),
+                (discriminator_loss_value,
+                 tf.reduce_mean(discriminator_output), tf.reduce_mean(discriminator_real_output))
+            )
 
         return train_step
 
@@ -533,6 +713,10 @@ class GAN(EncoderDecoder):
 
             discriminator_optimizer.apply_gradients(zip(discriminator_gradients, discriminator_trainable))
 
+            return (None, None, None, (tf.reduce_mean(discriminator_loss_value),
+                                       tf.reduce_mean(discriminator_output), tf.reduce_mean(discriminator_real_output))
+            )
+
         return train_step
 
     def save(self, name: str = None):
@@ -553,7 +737,7 @@ class GAN(EncoderDecoder):
 
         self.discriminator.save_weights('save/{}/discriminator'.format(name), overwrite=True)
 
-    def load(self, name: str = None):
+    def load(self, name: str = None, only_generator: bool = False, **kwargs):
         """
         Function loading encoder, decoder and discriminator from files created by save member function.
 
@@ -561,6 +745,7 @@ class GAN(EncoderDecoder):
         If both are None, exception will bre raised.
 
         :param name: name of the model, optional.
+        :param only_generator: boolean, set true to not load discriminator, otpional
         :return:
         """
         super(GAN, self).load(name)
@@ -568,7 +753,8 @@ class GAN(EncoderDecoder):
         if name is None:
             name = self.name
 
-        self.discriminator.load_weights('save/{}/discriminator'.format(name))
+        if not only_generator:
+            self.discriminator.load_weights('save/{}/discriminator'.format(name))
 
     def summary(self):
         """
