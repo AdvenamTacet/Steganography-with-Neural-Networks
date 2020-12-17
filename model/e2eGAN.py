@@ -3,11 +3,10 @@ from tensorflow.keras import layers
 import model.template as template
 import model.e2eCNN
 
+
 class e2eGAN(template.GAN):
     """
     Model from e2eCNN extended with discriminator.
-
-    Discriminator does not support dilation convolutions.
     """
     image_W = 160
     image_H = 160
@@ -24,11 +23,8 @@ class e2eGAN(template.GAN):
         self.__dr = dr
         super().__init__()
 
-        self.name = 'e2eGAN_' + str(self.basic_kernel_size()) + '_' + str(self.basic_dilation_rate())
-        try:
-            self.load(self.name)
-        except Exception as e:
-            print(e)
+    def get_name(self):
+        return 'e2eGAN_' + str(self.basic_kernel_size()) + '_' + str(self.basic_dilation_rate())
 
     def basic_kernel_size(self):
         """
@@ -54,29 +50,48 @@ class e2eGAN(template.GAN):
 
     def gen_discriminator_model(self):
         bks = self.basic_kernel_size()
-        covered_image = layers.Input(shape=(self.image_H, self.image_W, 3), name="covered_image")
+        dr = self.basic_dilation_rate()
 
-        clean_image = layers.Conv2D(filters=3, kernel_size=1, activation='relu',
-                                    padding='same', name='clean_image_0')(covered_image)
-        layer = layers.Conv2D(filters=3, kernel_size=bks, activation='relu',
-                              padding='same', name='discriminator_0')(clean_image)
+        connected_images_in = layers.Input(shape=(self.image_H, self.image_W, 3), name="connected_images")
 
-        N = 4
-        for i in range(N):
-            layer_in = layers.Concatenate(axis=3, name='discriminator_in_' + str(i+1))([layer, clean_image])
-            layer = layers.Conv2D(filters=3, kernel_size=bks, activation='relu',
-                                  padding='same', name='discriminator_' + str(i+1))(layer_in)
-            if i + 1 < N:
-                layer = layers.MaxPool2D(pool_size=(2, 2), name='discriminator_pool_{}'.format(i+1))(layer)
-                clean_image = layers.AveragePooling2D(pool_size=(2, 2), name='clean_image_{}'.format(i+1))(clean_image)
+        connected_images = layers.Conv2D(filters=3, kernel_size=1, dilation_rate=dr, activation='relu',
+                                    padding='same', name='connected_images_scale')(connected_images_in)
 
-        layer_flat = layers.Flatten(name='discriminator_flatten')(layer)
-        layer_d1 = layers.Dense(128, activation='relu', name='discriminator_dense_1')(layer_flat)
+        layer = layers.Conv2D(filters=16, kernel_size=bks, dilation_rate=dr, strides=min(bks, 2), activation='relu',
+                              padding='valid', name='discriminator_l_0')(connected_images)
 
-        layer_d2 = layers.Dense(64, activation='softmax', name='discriminator_dense_2')(layer_d1)
+        layer = layers.Conv2D(filters=16, kernel_size=bks, dilation_rate=dr, strides=min(bks, 2), activation='relu',
+                              padding='valid', name='discriminator_l_1')(layer)
 
-        layer_d3 = layers.Dense(8, activation='softmax', name='discriminator_dense_3')(layer_d2)
+        layer = layers.MaxPooling2D(pool_size=(2, 2), name='discriminator_pooling_1')(layer)
 
-        layer_out = layers.Dense(1, activation='sigmoid', name='discriminator_evaluation')(layer_d3)
+        layer = layers.Conv2D(filters=16, kernel_size=bks, dilation_rate=dr, activation='relu',
+                              padding='valid', name='discriminator_l_2')(layer)
 
-        return tf.keras.Model([covered_image], [layer_out], name="decoder_model")
+        layer = layers.Conv2D(filters=8, kernel_size=bks, dilation_rate=dr, activation='relu',
+                              padding='valid', name='discriminator_l_3')(layer)
+
+        layer = layers.Conv2D(filters=3, kernel_size=bks, dilation_rate=dr, activation='relu',
+                              padding='valid', name='discriminator_l_4')(layer)
+
+        layer = layers.Conv2D(filters=1, kernel_size=bks, dilation_rate=dr, activation='relu',
+                              padding='valid', name='discriminator_l_5')(layer)
+
+        layer = layers.Flatten(name='discriminator_flatten_1')(layer)
+
+        layer = layers.Dense(32, name='discriminator_dense_1')(layer)
+
+        colors = layers.AveragePooling2D(pool_size=(32, 32), name='colors_pooling')(connected_images)
+        colors = layers.Conv2D(filters=1, kernel_size=2, activation='relu',
+                               padding='valid', name='colors_l_1')(colors)
+        colors = layers.Flatten(name='colors_flatten')(colors)
+
+        layer = layers.Dense(8, name='discriminator_dense_2')(layer)
+        colors = layers.Dense(8, activation='relu', name='discriminator_colors_2')(colors)
+
+        final_layer = layers.Concatenate(axis=1, name='discriminator_connected_pipes')([layer, colors])
+
+        layer_out = layers.Dense(6, activation='sigmoid', name='discriminator_connected_pipes_l')(final_layer)
+        layer_out = layers.Dense(1, activation='sigmoid', name='discriminator_evaluation')(layer_out)
+
+        return tf.keras.Model([connected_images_in], [layer_out], name="decoder_model")

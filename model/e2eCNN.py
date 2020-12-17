@@ -33,11 +33,8 @@ class e2eCNN(template.EncoderDecoder):
         self.__dr = dr
         super().__init__()
 
-        self.name = 'e2eCNN_' + str(self.basic_kernel_size()) + '_' + str(self.basic_dilation_rate())
-        try:
-            self.load(self.name)
-        except Exception as e:
-            print(e)
+    def get_name(self):
+        return 'e2eCNN_' + str(self.basic_kernel_size()) + '_' + str(self.basic_dilation_rate())
 
     def basic_kernel_size(self):
         """
@@ -72,16 +69,19 @@ class e2eCNN(template.EncoderDecoder):
 
             conn_layer = layers.Conv2D(filters=16, kernel_size=bks, dilation_rate=dr, padding='same', activation='relu',
                                        name='encoder_color_A_' + str(i))(conn_layer_in)
-            gray_layer = layers.Conv2D(filters=16, kernel_size=bks, dilation_rate=dr, padding='same', activation='relu',
-                                       name='encoder_gray_A_' + str(i))(gray_layer)
 
             conn_layer = layers.Conv2D(filters=16, kernel_size=(bks if i+1 < N else 1),
                                        dilation_rate=(dr if i+1 < N else 1),
                                        activation='relu', padding='same', name='encoder_color_B_' + str(i))(conn_layer)
 
             if i + 1 < N:
+                gray_layer = layers.Conv2D(filters=16, kernel_size=bks, dilation_rate=dr, padding='same',
+                                           activation='relu', #kernel_initializer=tf.keras.initializers.Ones(),
+                                           name='encoder_gray_A_' + str(i))(gray_layer)
+
                 gray_layer = layers.Conv2D(filters=16, kernel_size=bks, dilation_rate=dr,
                                            padding='same', activation='relu',
+                                           #kernel_initializer=tf.keras.initializers.Ones(),
                                            name='encoder_gray_B_' + str(i))(gray_layer)
 
         layer_1 = layers.Conv2D(filters=8, kernel_size=1, padding='same', activation='relu',
@@ -94,7 +94,7 @@ class e2eCNN(template.EncoderDecoder):
     def gen_decoder_model(self):
         bks = self.basic_kernel_size()
         dr = self.basic_dilation_rate()
-        covered_image = layers.Input(shape=(self.image_H, self.image_W, 3))
+        covered_image = layers.Input(shape=(self.image_H, self.image_W, 3), name='connected_images')
 
         layer_0 = layers.Conv2D(filters=3, kernel_size=1, activation='relu',
                                 padding='same', name='decoder_l_0')(covered_image)
