@@ -1,4 +1,4 @@
-You can find here framework to learn and test Steganography Neural Nnetwork models.
+You can find here framework to learn and test Steganography Neural Network models.
 
 Templates:
 - Encoder-Decoder model template
